@@ -45,3 +45,14 @@ session_start();
   <script type="module" src="script.js"></script>
 </body>
 </html>
+<div style="
+    position: fixed;
+    bottom: 12px;
+    right: 18px;
+    color: #c8a7ff;
+    font-size: 13px;
+    font-family: Arial, sans-serif;
+    opacity: 0.8;
+">
+    Developed by Bishal GG
+</div>
