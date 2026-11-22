@@ -1,270 +1,285 @@
-import { FaceLandmarker, FilesetResolver } from
-  "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+import {
+  FaceLandmarker,
+  HandLandmarker,
+  FilesetResolver
+} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
 
-const video = document.querySelector("#camera");
-const canvas = document.querySelector("#overlay");
+const video = document.getElementById("camera");
+const canvas = document.getElementById("overlay");
 const ctx = canvas.getContext("2d");
-const statusEl = document.querySelector("#status");
-const instructionEl = document.querySelector("#instruction");
-const welcome = document.querySelector("#welcome");
-const startBtn = document.querySelector("#startBtn");
-const stopBtn = document.querySelector("#stopBtn");
-const smokeBtn = document.querySelector("#smokeBtn");
 
-let stream = null;
-let faceLandmarker = null;
+const status = document.getElementById("status");
+const instruction = document.getElementById("instruction");
+
+let faceTracker, handTracker;
+let stream;
 let running = false;
-let lastVideoTime = -1;
-let inhaleStartedAt = 0;
 let inhaling = false;
-let smokeParticles = [];
-let lastSmokeAt = 0;
-let sessionCount = 0;
+let inhaleTime = 0;
+let smoke = [];
+let lastTime = -1;
 
-const MODEL_URL =
-  "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
-
-function resizeCanvas() {
-  const rect = canvas.getBoundingClientRect();
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  canvas.width = Math.round(rect.width * dpr);
-  canvas.height = Math.round(rect.height * dpr);
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-}
-window.addEventListener("resize", resizeCanvas);
-
-async function setupFaceLandmarker() {
+async function setup() {
   const vision = await FilesetResolver.forVisionTasks(
     "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
   );
-  faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
-    baseOptions: { modelAssetPath: MODEL_URL, delegate: "GPU" },
+
+  faceTracker = await FaceLandmarker.createFromOptions(vision, {
+    baseOptions: {
+      modelAssetPath:
+        "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+      delegate: "GPU"
+    },
     runningMode: "VIDEO",
-    numFaces: 1,
-    outputFaceBlendshapes: false
+    numFaces: 1
+  });
+
+  handTracker = await HandLandmarker.createFromOptions(vision, {
+    baseOptions: {
+      modelAssetPath:
+        "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+      delegate: "GPU"
+    },
+    runningMode: "VIDEO",
+    numHands: 1
   });
 }
 
-async function startCamera() {
-  try {
-    startBtn.disabled = true;
-    statusEl.textContent = "Starting camera…";
-    if (!faceLandmarker) await setupFaceLandmarker();
-
-    stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } },
-      audio: false
-    });
-    video.srcObject = stream;
-    await video.play();
-
-    running = true;
-    welcome.classList.add("hidden");
-    stopBtn.disabled = false;
-    smokeBtn.disabled = false;
-    statusEl.textContent = "Camera active";
-    instructionEl.textContent = "Open your mouth for a moment to inhale, then close it to exhale.";
-    resizeCanvas();
-    requestAnimationFrame(renderLoop);
-  } catch (error) {
-    console.error(error);
-    statusEl.textContent = "Camera unavailable";
-    instructionEl.textContent =
-      "Camera or face tracking failed. Allow camera access and use localhost or HTTPS.";
-    startBtn.disabled = false;
-  }
+function resize() {
+  canvas.width = canvas.clientWidth;
+  canvas.height = canvas.clientHeight;
 }
 
-function stopCamera() {
-  running = false;
-  if (stream) stream.getTracks().forEach(track => track.stop());
-  stream = null;
-  video.srcObject = null;
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  smokeParticles = [];
-  inhaling = false;
-  inhaleStartedAt = 0;
-  welcome.classList.remove("hidden");
-  startBtn.disabled = false;
-  stopBtn.disabled = true;
-  smokeBtn.disabled = true;
-  statusEl.textContent = "Camera stopped";
-  instructionEl.textContent = "Press Start camera to begin.";
-}
+window.addEventListener("resize", resize);
 
-startBtn.addEventListener("click", startCamera);
-stopBtn.addEventListener("click", stopCamera);
-smokeBtn.addEventListener("click", () => {
-  const w = canvas.clientWidth, h = canvas.clientHeight;
-  createSmoke(w * 0.5, h * 0.48);
-});
-
-function point(landmarks, index, width, height) {
-  const p = landmarks[index];
-  return { x: (1 - p.x) * width, y: p.y * height };
+function pos(p) {
+  return {
+    x: (1 - p.x) * canvas.width,
+    y: p.y * canvas.height
+  };
 }
 
 function distance(a, b) {
   return Math.hypot(a.x - b.x, a.y - b.y);
 }
 
-function drawHookah(mouth, width, height) {
-  const baseX = width * 0.83;
-  const baseY = height * 0.84;
-  const neckX = width * 0.82;
-  const neckY = height * 0.55;
+async function startCamera() {
+  try {
+    status.textContent = "Loading tracking…";
 
-  ctx.save();
+    await setup();
+
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: true,
+      audio: false
+    });
+
+    video.srcObject = stream;
+    await video.play();
+
+    running = true;
+    document.getElementById("welcome").classList.add("hidden");
+    document.getElementById("stopBtn").disabled = false;
+    document.getElementById("smokeBtn").disabled = false;
+
+    resize();
+    status.textContent = "Camera active";
+
+    requestAnimationFrame(loop);
+  } catch (error) {
+    console.error(error);
+    status.textContent = "Camera error";
+  }
+}
+
+function stopCamera() {
+  running = false;
+
+  if (stream) {
+    stream.getTracks().forEach(track => track.stop());
+  }
+
+  video.srcObject = null;
+  smoke = [];
+
+  document.getElementById("welcome").classList.remove("hidden");
+  document.getElementById("startBtn").disabled = false;
+  document.getElementById("stopBtn").disabled = true;
+  document.getElementById("smokeBtn").disabled = true;
+}
+
+document.getElementById("startBtn").onclick = startCamera;
+document.getElementById("stopBtn").onclick = stopCamera;
+
+document.getElementById("smokeBtn").onclick = () => {
+  createSmoke(canvas.width / 2, canvas.height / 2, 2);
+};
+
+function drawHookah(pipe) {
+  const x = canvas.width * 0.85;
+  const y = canvas.height * 0.85;
+
   ctx.lineCap = "round";
-  ctx.lineJoin = "round";
 
-  // Hookah base and stem
-  const baseGrad = ctx.createLinearGradient(baseX - 38, baseY - 8, baseX + 38, baseY + 28);
-  baseGrad.addColorStop(0, "#d9c7f4");
-  baseGrad.addColorStop(.45, "#7c5da8");
-  baseGrad.addColorStop(1, "#382b4b");
-  ctx.fillStyle = baseGrad;
+  ctx.fillStyle = "#b99add";
   ctx.beginPath();
-  ctx.ellipse(baseX, baseY, 43, 23, 0, 0, Math.PI * 2);
+  ctx.ellipse(x, y, 38, 22, 0, 0, Math.PI * 2);
   ctx.fill();
 
-  ctx.strokeStyle = "#d9c7f4";
-  ctx.lineWidth = 11;
+  ctx.strokeStyle = "#d6baff";
+  ctx.lineWidth = 10;
   ctx.beginPath();
-  ctx.moveTo(neckX, baseY - 12);
-  ctx.lineTo(neckX, neckY + 25);
+  ctx.moveTo(x, y - 15);
+  ctx.lineTo(x, canvas.height * 0.58);
   ctx.stroke();
 
-  ctx.strokeStyle = "#5b4776";
-  ctx.lineWidth = 4;
-  ctx.beginPath();
-  ctx.moveTo(neckX, baseY - 12);
-  ctx.lineTo(neckX, neckY + 25);
-  ctx.stroke();
-
-  // Bowl
-  ctx.fillStyle = "#b99adf";
-  ctx.beginPath();
-  ctx.ellipse(neckX, neckY + 20, 23, 9, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillRect(neckX - 16, neckY - 2, 32, 20);
-
-  // Hose curves from the stem to the person's mouth
-  ctx.strokeStyle = "#201a2b";
+  ctx.strokeStyle = "#292033";
   ctx.lineWidth = 12;
   ctx.beginPath();
-  ctx.moveTo(neckX + 5, neckY + 32);
-  ctx.bezierCurveTo(width * 0.98, height * 0.58, width * 0.97, mouth.y + 30, mouth.x + 8, mouth.y + 9);
+  ctx.moveTo(x, canvas.height * 0.6);
+  ctx.quadraticCurveTo(
+    canvas.width * 0.65,
+    canvas.height * 0.7,
+    pipe.x,
+    pipe.y
+  );
   ctx.stroke();
 
   ctx.strokeStyle = "#c8a7ff";
   ctx.lineWidth = 5;
   ctx.beginPath();
-  ctx.moveTo(neckX + 5, neckY + 32);
-  ctx.bezierCurveTo(width * 0.98, height * 0.58, width * 0.97, mouth.y + 30, mouth.x + 8, mouth.y + 9);
+  ctx.moveTo(x, canvas.height * 0.6);
+  ctx.quadraticCurveTo(
+    canvas.width * 0.65,
+    canvas.height * 0.7,
+    pipe.x,
+    pipe.y
+  );
   ctx.stroke();
 
-  // Mouthpiece
-  ctx.fillStyle = "#f1e8ff";
+  ctx.fillStyle = "#eee4ff";
   ctx.beginPath();
-  ctx.roundRect(mouth.x - 13, mouth.y + 2, 30, 10, 5);
+  ctx.roundRect(pipe.x - 30, pipe.y - 6, 40, 12, 6);
   ctx.fill();
-
-  ctx.restore();
 }
 
-function createSmoke(x, y) {
-  const amount = 28;
-  for (let i = 0; i < amount; i++) {
-    smokeParticles.push({
-      x: x + (Math.random() - .5) * 18,
-      y: y + (Math.random() - .5) * 12,
-      vx: (Math.random() - .5) * 0.8,
-      vy: -0.7 - Math.random() * 1.6,
-      radius: 7 + Math.random() * 15,
-      alpha: 0.22 + Math.random() * 0.22,
-      life: 70 + Math.random() * 45,
+function createSmoke(x, y, strength = 1) {
+  for (let i = 0; i < 220 * strength; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const speed = Math.random() * 4;
+
+    smoke.push({
+      x,
+      y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed - 2,
+      size: 10 + Math.random() * 25,
+      alpha: 0.25,
+      life: 130,
       age: 0
     });
   }
 }
 
 function drawSmoke() {
-  for (let i = smokeParticles.length - 1; i >= 0; i--) {
-    const p = smokeParticles[i];
-    p.age++;
+  for (let i = smoke.length - 1; i >= 0; i--) {
+    const p = smoke[i];
+
     p.x += p.vx;
     p.y += p.vy;
-    p.vx += (Math.random() - .5) * 0.06;
-    p.radius += 0.09;
 
-    const fade = Math.max(0, 1 - p.age / p.life);
-    ctx.fillStyle = `rgba(235,232,242,${p.alpha * fade})`;
+    p.vx *= 0.99;
+    p.vy *= 0.99;
+
+    p.size += 0.2;
+    p.age++;
+
+    const opacity = p.alpha * (1 - p.age / p.life);
+
+    ctx.fillStyle = `rgba(240,240,245,${opacity})`;
+
     ctx.beginPath();
-    ctx.ellipse(p.x, p.y, p.radius * 0.8, p.radius, Math.random() * 0.4, 0, Math.PI * 2);
+    ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
     ctx.fill();
 
-    if (p.age >= p.life) smokeParticles.splice(i, 1);
+    if (p.age >= p.life) {
+      smoke.splice(i, 1);
+    }
   }
 }
 
-function renderLoop() {
+function loop() {
   if (!running) return;
-  const width = canvas.clientWidth;
-  const height = canvas.clientHeight;
-  ctx.clearRect(0, 0, width, height);
 
-  if (video.currentTime !== lastVideoTime && video.readyState >= 2) {
-    lastVideoTime = video.currentTime;
-    const result = faceLandmarker.detectForVideo(video, performance.now());
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    if (result.faceLandmarks && result.faceLandmarks.length) {
-      const landmarks = result.faceLandmarks[0];
-      const mouthTop = point(landmarks, 13, width, height);
-      const mouthBottom = point(landmarks, 14, width, height);
-      const mouthLeft = point(landmarks, 61, width, height);
-      const mouthRight = point(landmarks, 291, width, height);
-      const faceTop = point(landmarks, 10, width, height);
-      const chin = point(landmarks, 152, width, height);
+  if (video.currentTime !== lastTime) {
+    lastTime = video.currentTime;
+
+    const now = performance.now();
+
+    const face = faceTracker.detectForVideo(video, now);
+    const hand = handTracker.detectForVideo(video, now);
+
+    if (face.faceLandmarks.length && hand.landmarks.length) {
+      const f = face.faceLandmarks[0];
+      const h = hand.landmarks[0];
+
+      const mouthTop = pos(f[13]);
+      const mouthBottom = pos(f[14]);
+      const mouthLeft = pos(f[61]);
+      const mouthRight = pos(f[291]);
 
       const mouth = {
         x: (mouthLeft.x + mouthRight.x) / 2,
         y: (mouthTop.y + mouthBottom.y) / 2
       };
-      const mouthOpening = distance(mouthTop, mouthBottom) / Math.max(1, distance(faceTop, chin));
 
-      drawHookah(mouth, width, height);
+      const thumb = pos(h[4]);
+      const index = pos(h[8]);
 
-      // Hold mouth open to inhale; closing it after the inhale triggers exhale.
-      if (mouthOpening > 0.035) {
-        if (!inhaleStartedAt) inhaleStartedAt = performance.now();
-        if (!inhaling && performance.now() - inhaleStartedAt > 650) {
+      const pipe = {
+        x: (thumb.x + index.x) / 2,
+        y: (thumb.y + index.y) / 2
+      };
+
+      const pinch = distance(thumb, index) < 55;
+      const nearMouth = distance(pipe, mouth) < 110;
+
+      const mouthOpen =
+        distance(mouthTop, mouthBottom) > 12;
+
+      drawHookah(pipe);
+
+      if (pinch && nearMouth) {
+        if (!inhaleTime) inhaleTime = now;
+
+        if (now - inhaleTime > 700) {
           inhaling = true;
-          statusEl.textContent = "Inhaling…";
-          instructionEl.textContent = "Inhale detected. Close your mouth to exhale smoke.";
-        }
-      } else {
-        inhaleStartedAt = 0;
-        if (inhaling) {
-          inhaling = false;
-          sessionCount++;
-          createSmoke(mouth.x, mouth.y);
-          statusEl.textContent = "Exhaling";
-          instructionEl.textContent = "Smoke effect triggered! Open your mouth again to repeat.";
-          fetch("backend/save_session.php", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ event: "exhale", count: sessionCount })
-          }).catch(() => {});
-        } else {
-          statusEl.textContent = "Face detected";
+          status.textContent = "Inhaling";
+          instruction.textContent =
+            "Pull the pipe away and open your mouth!";
         }
       }
-    } else {
-      statusEl.textContent = "Looking for face…";
+
+      if (!nearMouth && inhaling && mouthOpen) {
+        inhaling = false;
+        inhaleTime = 0;
+
+        createSmoke(mouth.x, mouth.y, 2.5);
+
+        status.textContent = "BIG SMOKE!";
+        instruction.textContent =
+          "Smoke released! Bring the pipe back to inhale.";
+      }
+
+      if (!pinch || !nearMouth) {
+        if (!inhaling) inhaleTime = 0;
+      }
     }
   }
 
   drawSmoke();
-  requestAnimationFrame(renderLoop);
+
+  requestAnimationFrame(loop);
 }
